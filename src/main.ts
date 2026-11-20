@@ -1,15 +1,23 @@
 import { type Editor, MarkdownView, Notice, normalizePath, Plugin, type TFile } from "obsidian";
 import { type Note, NoteDeckClient, openDeepLink } from "./api";
-import { noteFileName, noteToMarkdown, noteWebUrl } from "./markdown";
+import {
+  escapeMarkdown,
+  isClipOf,
+  linkTarget,
+  noteFileName,
+  noteToMarkdown,
+  noteWebUrl,
+} from "./markdown";
 import { ClipUrlModal } from "./modals/clip";
 import { PostModal } from "./modals/post";
 import { SearchArchiveModal } from "./modals/search";
 import { DEFAULT_SETTINGS, type NoteDeckSettings, NoteDeckSettingTab } from "./settings";
+import { readToken, type SecretStore, writeToken } from "./token";
 import { TIMELINE_VIEW_TYPE, TimelineView } from "./views/timeline";
 
 export default class NoteDeckPlugin extends Plugin {
   settings: NoteDeckSettings = { ...DEFAULT_SETTINGS };
-  api = new NoteDeckClient(() => ({ baseUrl: this.settings.baseUrl, token: this.settings.token }));
+  api = new NoteDeckClient(() => ({ baseUrl: this.settings.baseUrl, token: this.getToken() }));
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -30,13 +38,13 @@ export default class NoteDeckPlugin extends Plugin {
     });
     this.addCommand({
       id: "compose-in-notedeck",
-      name: "Open NoteDeck's post form with selection",
+      name: "Open the app's post form with selection",
       editorCallback: (editor: Editor) =>
         openDeepLink("compose", { text: editor.getSelection() || undefined }),
     });
     this.addCommand({
       id: "search-archive",
-      name: "Search NoteDeck's archive and clip",
+      name: "Search archive and clip",
       callback: () => new SearchArchiveModal(this.app, this).open(),
     });
     this.addCommand({
@@ -55,6 +63,22 @@ export default class NoteDeckPlugin extends Plugin {
       ...DEFAULT_SETTINGS,
       ...((await this.loadData()) as Partial<NoteDeckSettings> | null),
     };
+    // data.json に平文で残っている token を、置ける版なら SecretStorage へ移す
+    if (this.settings.token && this.secretStorage()) await this.setToken(this.settings.token);
+  }
+
+  /** Obsidian 1.11.4 以降にだけある。minAppVersion では無いので有無を見て使う */
+  private secretStorage(): SecretStore | undefined {
+    return (this.app as { secretStorage?: SecretStore }).secretStorage;
+  }
+
+  getToken(): string {
+    return readToken(this.secretStorage(), this.settings);
+  }
+
+  async setToken(token: string): Promise<void> {
+    Object.assign(this.settings, writeToken(this.secretStorage(), token));
+    await this.saveSettings();
   }
 
   async saveSettings(): Promise<void> {
@@ -92,7 +116,13 @@ export default class NoteDeckPlugin extends Plugin {
   async clipNote(note: Note): Promise<TFile | null> {
     const folder = normalizePath(this.settings.clipFolder);
     const path = normalizePath(`${folder}/${noteFileName(note)}`);
-    let file = this.app.vault.getFileByPath(path);
+    // 取り込み済みかは frontmatter の note id で見る (file 名は端末の timezone で変わり、改名もされる)。
+    // 書いた直後で cache に載っていない分は path で拾う
+    let file =
+      this.app.vault
+        .getMarkdownFiles()
+        .find((f) => isClipOf(this.app.metadataCache.getFileCache(f)?.frontmatter, note)) ??
+      this.app.vault.getFileByPath(path);
     if (file) {
       this.notice("Already clipped. Opening the existing note.");
     } else {
@@ -100,7 +130,10 @@ export default class NoteDeckPlugin extends Plugin {
         if (!this.app.vault.getAbstractFileByPath(folder)) {
           await this.app.vault.createFolder(folder);
         }
-        file = await this.app.vault.create(path, noteToMarkdown(note));
+        file = await this.app.vault.create(
+          path,
+          noteToMarkdown(note, { hashtagsAsTags: this.settings.hashtagsAsTags }),
+        );
       } catch (e) {
         this.notice(`Could not write ${path}: ${e instanceof Error ? e.message : String(e)}`);
         return null;
@@ -127,6 +160,6 @@ export default class NoteDeckPlugin extends Plugin {
     }
     const url = noteWebUrl(note);
     const label = (note.text ?? note.cw ?? url).split(/\r?\n/)[0].slice(0, 60);
-    editor.replaceSelection(`[${label}](${url})`);
+    editor.replaceSelection(`[${escapeMarkdown(label, false)}](${linkTarget(url)})`);
   }
 }

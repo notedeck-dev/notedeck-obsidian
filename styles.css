@@ -50,6 +50,7 @@
 .notedeck-note__cw {
   font-style: italic;
 }
+.notedeck-note__renote,
 .notedeck-note__files {
   font-size: var(--font-ui-smaller);
   color: var(--text-faint);

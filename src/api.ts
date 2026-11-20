@@ -1,4 +1,5 @@
 import { requestUrl } from "obsidian";
+import { isLoopbackUrl, NOT_LOOPBACK_MESSAGE } from "./loopback";
 
 /**
  * NoteDeck の内蔵 HTTP API (既定 127.0.0.1:19820) の薄いクライアント。
@@ -97,6 +98,27 @@ export class NoteDeckApiError extends Error {
   }
 }
 
+/** 人の確認を待たない呼び出しの上限 */
+const REQUEST_TIMEOUT_MS = 15_000;
+
+function badResponse(): NoteDeckApiError {
+  return new NoteDeckApiError(200, "bad_response", "Unexpected response from the API URL.");
+}
+
+/** 表示と取り込みが前提にしている形だけ見る (生ルートと `/api/events` の note) */
+export function isNote(v: unknown): v is Note {
+  const n = v as Partial<Note> | null;
+  return (
+    typeof n === "object" &&
+    n !== null &&
+    typeof n.id === "string" &&
+    typeof n.createdAt === "string" &&
+    typeof n.user?.username === "string" &&
+    Array.isArray(n.files) &&
+    (n.renote == null || isNote(n.renote))
+  );
+}
+
 export class NoteDeckClient {
   constructor(private readonly target: () => ApiTarget) {}
 
@@ -104,11 +126,20 @@ export class NoteDeckClient {
     return this.target().baseUrl.replace(/\/+$/, "");
   }
 
-  private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: "GET" | "POST",
+    path: string,
+    body?: unknown,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
     const { token } = this.target();
+    if (!isLoopbackUrl(this.baseUrl())) {
+      throw new NoteDeckApiError(0, "not_loopback", NOT_LOOPBACK_MESSAGE);
+    }
     let res: Awaited<ReturnType<typeof requestUrl>>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      res = await requestUrl({
+      const pending = requestUrl({
         url: `${this.baseUrl()}${path}`,
         method,
         headers: {
@@ -118,9 +149,24 @@ export class NoteDeckClient {
         body: body !== undefined ? JSON.stringify(body) : undefined,
         throw: false,
       });
+      // `requestUrl` には timeout も中断も無いので、待つのをやめるだけ (要求自体は残る)
+      res = await (timeoutMs
+        ? Promise.race([
+            pending,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new NoteDeckApiError(0, "timeout", "No response in time.")),
+                timeoutMs,
+              );
+            }),
+          ])
+        : pending);
     } catch (e) {
+      if (e instanceof NoteDeckApiError) throw e;
       // 接続できない = NoteDeck が起動していない (または URL / ポート違い)
       throw new NoteDeckApiError(0, "unreachable", e instanceof Error ? e.message : String(e));
+    } finally {
+      clearTimeout(timer);
     }
     let data: Record<string, unknown> = {};
     try {
@@ -146,48 +192,60 @@ export class NoteDeckClient {
   }
 
   /** `POST /api/capabilities/{id}/execute` → `result` */
-  async execute<T>(capabilityId: string, params?: Record<string, unknown>): Promise<T> {
+  async execute<T>(
+    capabilityId: string,
+    params?: Record<string, unknown>,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
     const data = await this.request<{ ok?: boolean; result: T }>(
       "POST",
       `/api/capabilities/${encodeURIComponent(capabilityId)}/execute`,
       params ?? {},
+      timeoutMs,
     );
     // 200 でも NoteDeck の形でない (URL が別のサービスを指している等) なら result は無い
-    if (data.ok !== true) {
-      throw new NoteDeckApiError(200, "bad_response", "Unexpected response from the API URL.");
-    }
+    if (data.ok !== true) throw badResponse();
     return data.result;
   }
 
-  listAccounts(): Promise<AccountPublic[]> {
-    return this.execute<AccountPublic[]>("account.list");
+  async listAccounts(): Promise<AccountPublic[]> {
+    const accounts = await this.execute<AccountPublic[]>("account.list");
+    if (!Array.isArray(accounts)) throw badResponse();
+    return accounts;
   }
 
   createNote(params: CreateNoteParams): Promise<{ id: string }> {
-    return this.execute<{ id: string }>("notes.create", { ...params });
+    // NoteDeck の窓で本人が確認するまで返らないので、待つのを切らない
+    return this.execute<{ id: string }>("notes.create", { ...params }, 0);
   }
 
-  searchArchive(params: {
+  async searchArchive(params: {
     query?: string;
     limit?: number;
     accountIds?: string[];
   }): Promise<ArchiveHit[]> {
-    return this.execute<ArchiveHit[]>("notes.searchArchive", { ...params });
+    const hits = await this.execute<ArchiveHit[]>("notes.searchArchive", { ...params });
+    if (!Array.isArray(hits)) throw badResponse();
+    return hits;
   }
 
   /** 生のノート (添付・ユーザー情報つき)。host はログイン中のアカウントのサーバーでなければならない */
-  getNote(host: string, noteId: string): Promise<Note> {
-    return this.request<Note>(
+  async getNote(host: string, noteId: string): Promise<Note> {
+    const note = await this.request<unknown>(
       "GET",
       `/api/${encodeURIComponent(host)}/notes/${encodeURIComponent(noteId)}`,
     );
+    if (!isNote(note)) throw badResponse();
+    return note;
   }
 
-  timeline(host: string, type: string, limit = 30): Promise<Note[]> {
-    return this.request<Note[]>(
+  async timeline(host: string, type: string, limit = 30): Promise<Note[]> {
+    const notes = await this.request<unknown>(
       "GET",
       `/api/${encodeURIComponent(host)}/timeline/${encodeURIComponent(type)}?limit=${limit}`,
     );
+    if (!Array.isArray(notes) || !notes.every(isNote)) throw badResponse();
+    return notes;
   }
 
   /** 人向けのエラー文。NoteDeck 側の権限 / 確認の仕組みに沿って案内する */
@@ -204,6 +262,12 @@ export class NoteDeckClient {
         return `Not allowed for external tools. Allow it under Settings → Permissions → External. ${e.message}`;
       case "user_cancelled":
         return "Cancelled in NoteDeck.";
+      case "not_loopback":
+        return e.message;
+      case "timeout":
+        return "NoteDeck did not answer in time.";
+      case "bad_response":
+        return "Unexpected response. Is the API URL in settings pointing at NoteDeck?";
       default:
         return `NoteDeck: ${e.code}: ${e.message}`;
     }

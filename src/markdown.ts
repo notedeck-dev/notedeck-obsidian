@@ -50,11 +50,70 @@ function yamlString(s: string): string {
   return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n")}"`;
 }
 
+/** URL にそのまま置ける文字。本文中の URL と、リンク先に書く URL の両方でこの範囲だけ素通しする */
+const URL_CHAR = "[A-Za-z0-9\\-._~:/?#@!&=+,;]|%[0-9A-Fa-f]{2}";
+const URL_IN_TEXT = new RegExp(`https?://(?:${URL_CHAR})+`, "g");
+const URL_UNSAFE = new RegExp(`(?!${URL_CHAR})[^]`, "gu");
+
+/**
+ * 他人が書いた文を vault の Markdown に置くための無害化。Obsidian と plugin が動作として
+ * 解釈する記法 (code fence と inline code = Dataview 等の実行系、HTML、`[[wikilink]]`、
+ * `![[埋め込み]]` / `![](画像)`、Templater の `<% %>`、`%%コメント%%`、`$数式$`) を
+ * backslash で止める。表示では backslash が消えて元の文字が読める。URL は壊さない。
+ * Templater は Markdown を見ずに `<%` を探すので、`<` と `%` の両方に付けて並びを崩す。
+ * `#hashtag` は Obsidian の tag として使えるよう、既定では残す
+ */
+export function escapeMarkdown(text: string, hashtagsAsTags = true): string {
+  const special = hashtagsAsTags ? /[\\`~<[\]%$]/g : /[\\`~<[\]%$#]/g;
+  let out = "";
+  let last = 0;
+  for (const m of text.matchAll(URL_IN_TEXT)) {
+    out += text.slice(last, m.index).replace(special, "\\$&") + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + text.slice(last).replace(special, "\\$&");
+}
+
+/** `[text](ここ)` に置く URL。`)` や空白でリンクの外に出られないよう percent-encode する */
+export function linkTarget(url: string): string {
+  return url.replace(URL_UNSAFE, (c) =>
+    encodeURIComponent(c).replace(
+      /[!'()*]/g,
+      (x) => `%${x.charCodeAt(0).toString(16).toUpperCase()}`,
+    ),
+  );
+}
+
+/** 本文も CW も添付も無い renote (引用でないただの renote) なら、その renote 元 */
+export function renoteOnly(note: Note): Note | null {
+  return !note.text && !note.cw && !note.files.length && note.renote ? note.renote : null;
+}
+
+/** 取り込み済みファイルの frontmatter が、このノートのものか (file 名には依らない) */
+export function isClipOf(frontmatter: unknown, note: Note): boolean {
+  const fm = frontmatter as { notedeck?: unknown; note_id?: unknown; server?: unknown } | null;
+  return fm?.notedeck === "note" && fm.note_id === note.id && fm.server === note._serverHost;
+}
+
+export interface MarkdownOptions {
+  /** false なら `#hashtag` も無害化して Obsidian の tag にしない */
+  hashtagsAsTags?: boolean;
+}
+
 /**
  * ノート 1 件を YAML frontmatter つきの Markdown にする。
- * 本文は MFM のまま (Obsidian では平文として読める)。CW があれば折りたたみで出す。
+ * 本文は MFM を無害化して置く (Obsidian では平文として読める)。CW があれば折りたたみで出す。
  */
-export function noteToMarkdown(note: Note): string {
+export function noteToMarkdown(note: Note, options: MarkdownOptions = {}): string {
+  const esc = (s: string) => escapeMarkdown(s, options.hashtagsAsTags ?? true);
+  const oneLine = (s: string) => esc(s.replace(/\s*\r?\n\s*/g, " "));
+  const fileLine = (f: Note["files"][number]) => {
+    const img = f.type.startsWith("image/") && !f.isSensitive;
+    return isHttpUrl(f.url)
+      ? `${img ? "!" : ""}[${oneLine(f.name)}](${linkTarget(f.url)})`
+      : oneLine(f.name);
+  };
+
   const lines: string[] = ["---"];
   lines.push("notedeck: note");
   lines.push(`note_id: ${yamlString(note.id)}`);
@@ -72,9 +131,9 @@ export function noteToMarkdown(note: Note): string {
   lines.push("---");
   lines.push("");
 
-  const body = note.text ?? "";
+  const body = esc(note.text ?? "");
   if (note.cw) {
-    lines.push(`> [!note]- ${note.cw}`);
+    lines.push(`> [!note]- ${oneLine(note.cw)}`);
     for (const l of body.split(/\r?\n/)) lines.push(`> ${l}`);
   } else if (body) {
     lines.push(body);
@@ -82,17 +141,17 @@ export function noteToMarkdown(note: Note): string {
 
   if (note.files.length) {
     lines.push("");
-    for (const f of note.files) {
-      const img = f.type.startsWith("image/") && !f.isSensitive;
-      lines.push(isHttpUrl(f.url) ? `${img ? "!" : ""}[${f.name}](${f.url})` : f.name);
-    }
+    for (const f of note.files) lines.push(fileLine(f));
   }
 
+  // 引用 (本文つき) でも、ただの renote でも、renote 元の中身を出す
   const quoted = note.renote;
-  if (quoted && note.text) {
+  if (quoted) {
+    const url = linkTarget(noteWebUrl(quoted));
     lines.push("");
-    lines.push(`> **${noteHandle(quoted)}** — [${noteWebUrl(quoted)}](${noteWebUrl(quoted)})`);
-    for (const l of (quoted.text ?? "").split(/\r?\n/)) lines.push(`> ${l}`);
+    lines.push(`> **${oneLine(noteHandle(quoted))}** — [${url}](${url})`);
+    for (const l of esc(quoted.text ?? "").split(/\r?\n/)) lines.push(`> ${l}`);
+    for (const f of quoted.files) lines.push(`> ${fileLine(f)}`);
   }
 
   lines.push("");

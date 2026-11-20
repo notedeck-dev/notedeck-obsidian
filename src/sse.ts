@@ -1,5 +1,6 @@
 import * as http from "node:http";
 import * as https from "node:https";
+import { isLoopbackUrl, NOT_LOOPBACK_MESSAGE } from "./loopback";
 
 /**
  * `/api/events` (Server-Sent Events) の購読。Obsidian の renderer から直接 `fetch` すると
@@ -23,6 +24,10 @@ export function subscribeSse(
   types: string[],
   handlers: SseHandlers,
 ): SseSubscription {
+  if (!isLoopbackUrl(baseUrl)) {
+    handlers.onState("closed", NOT_LOOPBACK_MESSAGE);
+    return { close: () => {} };
+  }
   let closed = false;
   let req: http.ClientRequest | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;

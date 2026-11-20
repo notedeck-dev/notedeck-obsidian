@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { Note } from "../src/api";
-import { noteFileName, noteToMarkdown, noteWebUrl, parseNoteUrl } from "../src/markdown";
+import {
+  escapeMarkdown,
+  isClipOf,
+  noteFileName,
+  noteToMarkdown,
+  noteWebUrl,
+  parseNoteUrl,
+  renoteOnly,
+} from "../src/markdown";
 
 function note(over: Partial<Note> = {}): Note {
   return {
@@ -139,5 +147,109 @@ describe("noteToMarkdown", () => {
     expect(md).toContain('renote_of: "q1"');
     expect(md).toContain("> **@bob@misskey.example**");
     expect(md).toContain("> quoted");
+  });
+  it("本文だけの renote は renote 元の本文と添付を出す", () => {
+    const md = noteToMarkdown(
+      note({
+        text: null,
+        renoteId: "q1",
+        renote: note({
+          id: "q1",
+          text: "original",
+          user: { ...note().user, username: "bob" },
+          files: [
+            {
+              id: "f1",
+              name: "a.png",
+              type: "image/png",
+              url: "https://x/a.png",
+              thumbnailUrl: null,
+              isSensitive: false,
+            },
+          ],
+        }),
+      }),
+    );
+    expect(md).toContain("> **@bob@misskey.example**");
+    expect(md).toContain("> original");
+    expect(md).toContain("> ![a.png](https://x/a.png)");
+  });
+  it("本文・CW・添付名・引用の記法を無効化する", () => {
+    const md = noteToMarkdown(
+      note({
+        text: "```dataviewjs\nevil()\n```\n[[Secret]] ![[Secret]] ![](https://t/p.png) <% tp.x %> <img src=x>",
+        cw: "[[cw]]\n<b>",
+        files: [
+          {
+            id: "f1",
+            name: "a](https://evil/x) ![[b]].pdf",
+            type: "application/pdf",
+            url: "https://x/a) ![](https://t/p.png",
+            thumbnailUrl: null,
+            isSensitive: false,
+          },
+        ],
+        renoteId: "q1",
+        renote: note({ id: "q1", text: "![[q]]", user: { ...note().user, username: "[[bob]]" } }),
+      }),
+    );
+    const body = md.slice(md.indexOf("\n---\n") + 5);
+    expect(body).not.toMatch(/^\s*(```|~~~)/m);
+    expect(body).not.toMatch(/(?<!\\)\[\[/);
+    expect(body).not.toMatch(/(?<!\\)<[a-z%!/]/i);
+    expect(body).not.toContain("<%");
+    expect(body).not.toMatch(/(?<!\\)\]\(https:\/\/t\/p/);
+    expect(body).not.toMatch(/(?<!\\)\]\(https:\/\/evil/);
+    expect(body).toContain("> [!note]- \\[\\[cw\\]\\] \\<b>");
+    expect(body).toContain("(https://x/a%29%20!%5B%5D%28https://t/p.png)");
+  });
+  it("#hashtag は既定で残し、指定すれば無効化する", () => {
+    expect(noteToMarkdown(note({ text: "hi #tag" }))).toContain("\nhi #tag\n");
+    expect(noteToMarkdown(note({ text: "hi #tag" }), { hashtagsAsTags: false })).toContain(
+      "\nhi \\#tag\n",
+    );
+  });
+});
+
+describe("escapeMarkdown", () => {
+  it("fence / HTML / wikilink / 埋め込み / Templater / コメント / 数式を無効化する", () => {
+    expect(escapeMarkdown("```js\n~~~")).toBe("\\`\\`\\`js\n\\~\\~\\~");
+    expect(escapeMarkdown("<script>")).toBe("\\<script>");
+    expect(escapeMarkdown("[[a]] ![[b]] ![c](d)")).toBe("\\[\\[a\\]\\] !\\[\\[b\\]\\] !\\[c\\](d)");
+    expect(escapeMarkdown("<% tp.file.title %>")).toBe("\\<\\% tp.file.title \\%>");
+    expect(escapeMarkdown("%%hidden%% $x$")).toBe("\\%\\%hidden\\%\\% \\$x\\$");
+    expect(escapeMarkdown("`$= evil()`")).toBe("\\`\\$= evil()\\`");
+  });
+  it("元からある backslash は二重にして、後ろの記号を生かさない", () => {
+    expect(escapeMarkdown("\\`x\\`")).toBe("\\\\\\`x\\\\\\`");
+  });
+  it("URL は壊さない (URL に使える文字だけ)", () => {
+    const url = "https://example.com/~u/a%20b?q=1&r=2#frag";
+    expect(escapeMarkdown(`see ${url} ok`)).toBe(`see ${url} ok`);
+    expect(escapeMarkdown("https://x/`$=1`")).toBe("https://x/\\`\\$=1\\`");
+    expect(escapeMarkdown("https://x/%%a")).toBe("https://x/\\%\\%a");
+  });
+  it("#hashtag は指定したときだけ無効化する", () => {
+    expect(escapeMarkdown("#a")).toBe("#a");
+    expect(escapeMarkdown("#a https://x/#f", false)).toBe("\\#a https://x/#f");
+  });
+});
+
+describe("renoteOnly", () => {
+  it("本文も CW も添付も無い renote だけ、renote 元を返す", () => {
+    const src = note({ id: "q1" });
+    expect(renoteOnly(note({ text: null, renoteId: "q1", renote: src }))).toBe(src);
+    expect(renoteOnly(note({ text: "quote", renoteId: "q1", renote: src }))).toBeNull();
+    expect(renoteOnly(note({ text: null }))).toBeNull();
+  });
+});
+
+describe("isClipOf", () => {
+  it("frontmatter の note_id と server で同じノートか判定する", () => {
+    const fm = { notedeck: "note", note_id: "abc123", server: "misskey.example" };
+    expect(isClipOf(fm, note())).toBe(true);
+    expect(isClipOf({ ...fm, note_id: "other" }, note())).toBe(false);
+    expect(isClipOf({ ...fm, server: "other.example" }, note())).toBe(false);
+    expect(isClipOf(undefined, note())).toBe(false);
   });
 });

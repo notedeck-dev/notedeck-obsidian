@@ -1,7 +1,7 @@
 import { ItemView, Menu, setIcon, type WorkspaceLeaf } from "obsidian";
-import { type AccountPublic, accountLabel, type Note } from "../api";
+import { type AccountPublic, accountLabel, isNote, type Note } from "../api";
 import type NoteDeckPlugin from "../main";
-import { noteDeepLink, noteHandle, noteWebUrl } from "../markdown";
+import { noteDeepLink, noteHandle, noteWebUrl, renoteOnly } from "../markdown";
 import type { TimelineType } from "../settings";
 import { type SseSubscription, subscribeSse } from "../sse";
 
@@ -96,7 +96,8 @@ export class TimelineView extends ItemView {
     // 未取得 (起動時に NoteDeck が落ちていた等) ならアカウントから取り直す
     if (!this.accounts.length) {
       try {
-        this.accounts = await this.plugin.api.listAccounts();
+        // token の無いアカウント (ゲスト) では timeline を取れない
+        this.accounts = (await this.plugin.api.listAccounts()).filter((a) => a.hasToken);
       } catch (e) {
         this.setStatus(this.plugin.api.describeError(e));
         return;
@@ -133,15 +134,21 @@ export class TimelineView extends ItemView {
 
   private subscribe(): void {
     this.sse?.close();
-    const { baseUrl, token } = this.plugin.settings;
-    this.sse = subscribeSse(baseUrl, token, ["note"], {
-      onEvent: (_type, data) => {
-        const payload = data as { accountId?: string; note?: Note } | null;
+    this.sse = subscribeSse(this.plugin.settings.baseUrl, this.plugin.getToken(), ["note"], {
+      onEvent: (type, data) => {
+        // 本体の type filter は前方一致で `notification` / `note-updated` も届くので、note だけ見る
+        if (type !== "note") return;
+        const payload = data as { accountId?: string; note?: unknown } | null;
         const note = payload?.note;
-        if (!note || payload?.accountId !== this.plugin.settings.accountId) return;
+        if (!isNote(note) || payload?.accountId !== this.plugin.settings.accountId) return;
         if (this.notes.some((n) => n.id === note.id)) return;
-        this.notes = [note, ...this.notes].slice(0, MAX_NOTES);
-        this.render();
+        // 全部描き直すと scroll が飛ぶので、先頭に 1 件足して溢れた末尾を外すだけにする
+        this.notes = [note, ...this.notes];
+        this.listEl?.prepend(this.noteEl(note));
+        if (this.notes.length > MAX_NOTES) {
+          this.notes.length = MAX_NOTES;
+          this.listEl?.lastElementChild?.remove();
+        }
       },
       onState: (state, error) => {
         if (state === "closed" && error) {
@@ -160,24 +167,31 @@ export class TimelineView extends ItemView {
     const list = this.listEl;
     if (!list) return;
     list.empty();
-    for (const note of this.notes) {
-      const el = list.createDiv({ cls: "notedeck-note" });
-      el.createDiv({ cls: "notedeck-note__head" }, (head) => {
-        head.createSpan({ cls: "notedeck-note__name", text: note.user.name || note.user.username });
-        head.createSpan({ text: noteHandle(note) });
-        head.createSpan({ text: new Date(note.createdAt).toLocaleTimeString() });
+    for (const note of this.notes) list.appendChild(this.noteEl(note));
+  }
+
+  private noteEl(note: Note): HTMLElement {
+    const el = createDiv({ cls: "notedeck-note" });
+    el.createDiv({ cls: "notedeck-note__head" }, (head) => {
+      head.createSpan({ cls: "notedeck-note__name", text: note.user.name || note.user.username });
+      head.createSpan({ text: noteHandle(note) });
+      head.createSpan({ text: new Date(note.createdAt).toLocaleTimeString() });
+    });
+    // ただの renote は renote 元の中身を出す (誰が renote したかは上の行に残る)
+    const shown = renoteOnly(note) ?? note;
+    if (shown !== note)
+      el.createDiv({ cls: "notedeck-note__renote", text: `Renote of ${noteHandle(shown)}` });
+    if (shown.cw)
+      el.createDiv({ cls: "notedeck-note__text notedeck-note__cw", text: `CW: ${shown.cw}` });
+    else
+      el.createDiv({
+        cls: "notedeck-note__text",
+        text: shown.text ?? (shown.renoteId ? "(renote)" : ""),
       });
-      if (note.cw)
-        el.createDiv({ cls: "notedeck-note__text notedeck-note__cw", text: `CW: ${note.cw}` });
-      else
-        el.createDiv({
-          cls: "notedeck-note__text",
-          text: note.text ?? (note.renoteId ? "(renote)" : ""),
-        });
-      if (note.files.length)
-        el.createDiv({ cls: "notedeck-note__files", text: `${note.files.length} attachment(s)` });
-      el.addEventListener("click", (evt) => this.showMenu(note, evt));
-    }
+    if (shown.files.length)
+      el.createDiv({ cls: "notedeck-note__files", text: `${shown.files.length} attachment(s)` });
+    el.addEventListener("click", (evt) => this.showMenu(note, evt));
+    return el;
   }
 
   private showMenu(note: Note, evt: MouseEvent): void {

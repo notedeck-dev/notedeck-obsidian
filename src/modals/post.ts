@@ -6,7 +6,7 @@ import type NoteDeckPlugin from "../main";
 export class PostModal extends Modal {
   private text: string;
   private cw = "";
-  private visibility: NoteVisibility = "public";
+  private visibility: NoteVisibility;
   private accountId: string;
   private accounts: AccountPublic[] = [];
 
@@ -18,6 +18,7 @@ export class PostModal extends Modal {
     super(app);
     this.text = initialText;
     this.accountId = plugin.settings.accountId;
+    this.visibility = plugin.settings.visibility;
   }
 
   async onOpen(): Promise<void> {
@@ -25,7 +26,8 @@ export class PostModal extends Modal {
     this.setTitle("Post a note via NoteDeck");
 
     try {
-      this.accounts = await this.plugin.api.listAccounts();
+      // token の無いアカウント (ゲスト) では投稿できない
+      this.accounts = (await this.plugin.api.listAccounts()).filter((a) => a.hasToken);
     } catch (e) {
       contentEl.createEl("p", { text: this.plugin.api.describeError(e) });
       return;
@@ -88,6 +90,7 @@ export class PostModal extends Modal {
         accountId: this.accountId,
       });
       this.plugin.settings.accountId = this.accountId;
+      this.plugin.settings.visibility = this.visibility;
       await this.plugin.saveSettings();
       this.plugin.notice("Posted.");
       this.close();
