@@ -2,7 +2,7 @@
   "id": "notedeck",
   "name": "NoteDeck",
   "version": "0.1.0",
-  "minAppVersion": "1.5.0",
+  "minAppVersion": "1.7.2",
   "description": "Clip Misskey notes into your vault, post from Obsidian and watch a timeline in the sidebar through NoteDeck (Misskey client) running on this machine.",
   "author": "NoteDeck contributors",
   "authorUrl": "https://github.com/notedeck-dev",

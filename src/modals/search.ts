@@ -2,12 +2,15 @@ import { type App, Keymap, SuggestModal } from "obsidian";
 import type { ArchiveHit } from "../api";
 import type NoteDeckPlugin from "../main";
 
+const DEBOUNCE_MS = 250;
+
 /**
  * `notes.searchArchive` (手元の索引、サーバーとアカウント横断) を引く。
  * Enter = vault に取り込んで開く、Mod+Enter = カーソル位置にリンクを挿入。
  */
 export class SearchArchiveModal extends SuggestModal<ArchiveHit> {
   private latestQuery = "";
+  private lastError = "";
 
   constructor(
     app: App,
@@ -27,15 +30,22 @@ export class SearchArchiveModal extends SuggestModal<ArchiveHit> {
 
   async getSuggestions(query: string): Promise<ArchiveHit[]> {
     this.latestQuery = query;
+    // 打鍵が止まるまで待ち、その間に次の打鍵があれば引かない
+    await new Promise((resolve) => window.setTimeout(resolve, DEBOUNCE_MS));
+    if (this.latestQuery !== query) return [];
     try {
       const hits = await this.plugin.api.searchArchive({
         query: query.trim() || undefined,
         limit: 30,
       });
+      this.lastError = "";
       // 打鍵の途中で古い応答が後から届いても捨てる
       return this.latestQuery === query ? hits : [];
     } catch (e) {
-      this.plugin.notice(this.plugin.api.describeError(e));
+      // 同じエラー (NoteDeck が起動していない等) を引くたびに出さない
+      const message = this.plugin.api.describeError(e);
+      if (message !== this.lastError) this.plugin.notice(message);
+      this.lastError = message;
       return [];
     }
   }

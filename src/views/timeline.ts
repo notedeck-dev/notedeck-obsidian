@@ -18,6 +18,8 @@ export class TimelineView extends ItemView {
   private notes: Note[] = [];
   private listEl: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
+  private accountSelectEl: HTMLSelectElement | null = null;
+  private paused = false;
   private sse: SseSubscription | null = null;
 
   constructor(
@@ -65,24 +67,16 @@ export class TimelineView extends ItemView {
       void this.plugin.saveSettings();
       void this.reload();
     });
-    refresh.addEventListener("click", () => void this.reload());
+    refresh.addEventListener("click", () => void this.start());
 
-    try {
-      this.accounts = await this.plugin.api.listAccounts();
-    } catch (e) {
-      this.setStatus(this.plugin.api.describeError(e));
-      return;
-    }
-    for (const a of this.accounts)
-      accountSelect.createEl("option", { value: a.id, text: accountLabel(a) });
-    if (!this.accounts.some((a) => a.id === this.plugin.settings.accountId) && this.accounts[0]) {
-      this.plugin.settings.accountId = this.accounts[0].id;
-      await this.plugin.saveSettings();
-    }
-    accountSelect.value = this.plugin.settings.accountId;
+    this.accountSelectEl = accountSelect;
+    await this.start();
+  }
 
+  /** 読み直して購読も張り直す (起動時に繋がらなかった / 401・403 で止まった購読もここで戻る) */
+  private async start(): Promise<void> {
     await this.reload();
-    this.subscribe();
+    if (this.accounts.length) this.subscribe();
   }
 
   async onClose(): Promise<void> {
@@ -99,6 +93,24 @@ export class TimelineView extends ItemView {
   }
 
   private async reload(): Promise<void> {
+    // 未取得 (起動時に NoteDeck が落ちていた等) ならアカウントから取り直す
+    if (!this.accounts.length) {
+      try {
+        this.accounts = await this.plugin.api.listAccounts();
+      } catch (e) {
+        this.setStatus(this.plugin.api.describeError(e));
+        return;
+      }
+      const accountSelect = this.accountSelectEl;
+      accountSelect?.empty();
+      for (const a of this.accounts)
+        accountSelect?.createEl("option", { value: a.id, text: accountLabel(a) });
+      if (!this.accounts.some((a) => a.id === this.plugin.settings.accountId) && this.accounts[0]) {
+        this.plugin.settings.accountId = this.accounts[0].id;
+        await this.plugin.saveSettings();
+      }
+      if (accountSelect) accountSelect.value = this.plugin.settings.accountId;
+    }
     const account = this.currentAccount();
     if (!account) {
       this.setStatus("NoteDeck has no logged-in accounts.");
@@ -132,7 +144,14 @@ export class TimelineView extends ItemView {
         this.render();
       },
       onState: (state, error) => {
-        if (state === "closed" && error) this.setStatus(`Live updates paused: ${error}`);
+        if (state === "closed" && error) {
+          this.paused = true;
+          this.setStatus(`Live updates paused: ${error}`);
+        } else if (state === "open" && this.paused) {
+          // 繋ぎ直せたら、切れていた間の分ごと読み直して表示を戻す
+          this.paused = false;
+          void this.reload();
+        }
       },
     });
   }

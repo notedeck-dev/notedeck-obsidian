@@ -48,7 +48,12 @@ export function subscribeSse(
       (res) => {
         if (res.statusCode !== 200) {
           res.resume();
-          scheduleRetry(`HTTP ${res.statusCode}`);
+          // token が無効 / 権限が無いときは繋ぎ直しても同じなので止める
+          if (res.statusCode === 401 || res.statusCode === 403) {
+            handlers.onState("closed", `HTTP ${res.statusCode}`);
+          } else {
+            scheduleRetry(`HTTP ${res.statusCode}`);
+          }
           return;
         }
         backoff = 1_000;

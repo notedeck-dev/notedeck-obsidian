@@ -91,13 +91,15 @@ export default class NoteDeckPlugin extends Plugin {
 
   async clipNote(note: Note): Promise<TFile | null> {
     const folder = normalizePath(this.settings.clipFolder);
-    if (!this.app.vault.getAbstractFileByPath(folder)) await this.app.vault.createFolder(folder);
     const path = normalizePath(`${folder}/${noteFileName(note)}`);
     let file = this.app.vault.getFileByPath(path);
     if (file) {
       this.notice("Already clipped. Opening the existing note.");
     } else {
       try {
+        if (!this.app.vault.getAbstractFileByPath(folder)) {
+          await this.app.vault.createFolder(folder);
+        }
         file = await this.app.vault.create(path, noteToMarkdown(note));
       } catch (e) {
         this.notice(`Could not write ${path}: ${e instanceof Error ? e.message : String(e)}`);

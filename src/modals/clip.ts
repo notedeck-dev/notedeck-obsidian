@@ -20,7 +20,7 @@ export class ClipUrlModal extends Modal {
       text: "URL of a note on a server you are logged in to in NoteDeck, e.g. https://misskey.io/notes/abc123.",
     });
     new Setting(contentEl).setName("Note URL").addText((t) => {
-      t.inputEl.style.width = "100%";
+      t.inputEl.addClass("notedeck-input--wide");
       t.onChange((v) => {
         this.value = v;
       });

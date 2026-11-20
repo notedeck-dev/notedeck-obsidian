@@ -17,9 +17,16 @@ export function noteHandle(note: Note): string {
   return `@${note.user.username}@${note.user.host ?? note._serverHost}`;
 }
 
-/** 元サーバーの URL。リモートノートは `url` / `uri`、ローカルは見たサーバーで組む */
+function isHttpUrl(s: string | undefined): s is string {
+  return s !== undefined && /^https?:\/\//i.test(s);
+}
+
+/**
+ * 元サーバーの URL。リモートノートは `url` / `uri`、ローカルは見たサーバーで組む。
+ * `url` / `uri` はリモートサーバーが決める値なので、http(s) 以外は使わない
+ */
 export function noteWebUrl(note: Note): string {
-  return note.url ?? note.uri ?? `https://${note._serverHost}/notes/${note.id}`;
+  return [note.url, note.uri].find(isHttpUrl) ?? `https://${note._serverHost}/notes/${note.id}`;
 }
 
 export function noteDeepLink(note: Note): string {
@@ -77,7 +84,7 @@ export function noteToMarkdown(note: Note): string {
     lines.push("");
     for (const f of note.files) {
       const img = f.type.startsWith("image/") && !f.isSensitive;
-      lines.push(`${img ? "!" : ""}[${f.name}](${f.url})`);
+      lines.push(isHttpUrl(f.url) ? `${img ? "!" : ""}[${f.name}](${f.url})` : f.name);
     }
   }
 

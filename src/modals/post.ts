@@ -58,7 +58,7 @@ export class PostModal extends Modal {
 
     new Setting(contentEl).setName("Text").addTextArea((t) => {
       t.inputEl.rows = 8;
-      t.inputEl.style.width = "100%";
+      t.inputEl.addClass("notedeck-input--wide");
       t.setValue(this.text).onChange((v) => {
         this.text = v;
       });

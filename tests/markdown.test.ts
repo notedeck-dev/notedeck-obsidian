@@ -44,6 +44,14 @@ describe("noteWebUrl", () => {
     );
     expect(noteWebUrl(note())).toBe("https://misskey.example/notes/abc123");
   });
+  it("http(s) でない url / uri は使わず、見たサーバーで組む", () => {
+    expect(noteWebUrl(note({ url: "javascript:alert(1)", uri: "file:///etc/hosts" }))).toBe(
+      "https://misskey.example/notes/abc123",
+    );
+    expect(noteWebUrl(note({ url: "javascript:alert(1)", uri: "https://other.example/n/x" }))).toBe(
+      "https://other.example/n/x",
+    );
+  });
 });
 
 describe("noteFileName", () => {
@@ -102,6 +110,24 @@ describe("noteToMarkdown", () => {
     expect(md).toContain("![a.png](https://x/a.png)");
     expect(md).toContain("\n[b.png](https://x/b.png)");
     expect(md).toContain("\n[c.pdf](https://x/c.pdf)");
+  });
+  it("http(s) でない添付の URL はリンクにしない", () => {
+    const md = noteToMarkdown(
+      note({
+        files: [
+          {
+            id: "f1",
+            name: "a.png",
+            type: "image/png",
+            url: "javascript:alert(1)",
+            thumbnailUrl: null,
+            isSensitive: false,
+          },
+        ],
+      }),
+    );
+    expect(md).not.toContain("javascript:");
+    expect(md).toContain("\na.png\n");
   });
   it("引用は本文の後に blockquote で足す", () => {
     const md = noteToMarkdown(

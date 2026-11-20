@@ -129,13 +129,17 @@ export class NoteDeckClient {
       data = {};
     }
     if (res.status < 200 || res.status >= 300) {
+      // capability ルートは `{ code, error: 文 }`、生ルートは `{ error: CODE, message: 文 }`
+      const raw = typeof data.message === "string" ? data.message : undefined;
       const code =
         typeof data.code === "string"
           ? data.code
           : res.status === 401
             ? "unauthorized"
-            : "http_error";
-      const message = typeof data.error === "string" ? data.error : `HTTP ${res.status}`;
+            : raw !== undefined && typeof data.error === "string"
+              ? data.error
+              : "http_error";
+      const message = raw ?? (typeof data.error === "string" ? data.error : `HTTP ${res.status}`);
       throw new NoteDeckApiError(res.status, code, message);
     }
     return data as T;
@@ -143,11 +147,15 @@ export class NoteDeckClient {
 
   /** `POST /api/capabilities/{id}/execute` → `result` */
   async execute<T>(capabilityId: string, params?: Record<string, unknown>): Promise<T> {
-    const data = await this.request<{ ok: true; result: T }>(
+    const data = await this.request<{ ok?: boolean; result: T }>(
       "POST",
       `/api/capabilities/${encodeURIComponent(capabilityId)}/execute`,
       params ?? {},
     );
+    // 200 でも NoteDeck の形でない (URL が別のサービスを指している等) なら result は無い
+    if (data.ok !== true) {
+      throw new NoteDeckApiError(200, "bad_response", "Unexpected response from the API URL.");
+    }
     return data.result;
   }
 
